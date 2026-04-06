@@ -19,6 +19,20 @@ Do not install this on a machine or Blender environment you do not control.
 - A live App Server bridge over `stdio`
 - Structured Blender tools for common scene operations, plus a raw Python escape hatch
 
+## Demo
+
+Animated preview:
+
+![Codex workspace demo](docs/media/codex-workspace-preview.gif)
+
+Higher-quality MP4:
+
+- [docs/media/codex-workspace-demo.mp4](docs/media/codex-workspace-demo.mp4)
+
+Screenshot:
+
+![Codex workspace screenshot](docs/media/codex-workspace-screenshot.png)
+
 ## Requirements
 
 - Blender `3.0.0`
