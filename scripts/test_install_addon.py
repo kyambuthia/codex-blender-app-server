@@ -20,12 +20,21 @@ def main() -> int:
 
     import codex_blender_unsafe
 
+    workspace = codex_blender_unsafe._ensure_codex_workspace()
+    if workspace is None:
+        raise RuntimeError("Codex workspace was not created")
+    area_types = []
+    for screen in workspace.screens:
+        area_types.extend(area.type for area in screen.areas)
+
     payload = {
         "zip_path": str(zip_path),
         "module_file": str(Path(codex_blender_unsafe.__file__).resolve()),
         "addon_enabled": "codex_blender_unsafe" in bpy.context.preferences.addons.keys(),
         "bl_info_name": codex_blender_unsafe.bl_info["name"],
         "bl_info_version": ".".join(str(part) for part in codex_blender_unsafe.bl_info["version"]),
+        "workspace_name": workspace.name,
+        "workspace_area_types": area_types,
     }
     print(json.dumps(payload, indent=2))
     return 0

@@ -13,7 +13,7 @@ from .app_server import CodexAppServerClient, default_workspace
 bl_info = {
     "name": "Codex Blender Unsafe",
     "author": "OpenAI Codex",
-    "version": (0, 3, 0),
+    "version": (0, 4, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Codex Unsafe",
     "description": "Unsafe live Codex App Server integration for Blender 3.0",
@@ -22,11 +22,13 @@ bl_info = {
 
 
 _BRIDGE: CodexAppServerClient | None = None
+_WORKSPACE_NAME = "Codex"
 _DEFAULT_PROMPT_TEXT_NAME = "Codex Prompt"
 _DEFAULT_PROMPT_TEXT = (
     "Inspect the current scene and explain what you can change.\n"
     "Prefer the structured Blender tools before blender_run_python."
 )
+_SPINNER_FRAMES = ("|", "/", "-", "\\")
 
 
 def _workspace_default() -> str:
@@ -67,6 +69,11 @@ else:
             bpy.app.timers.register(_pump_bridge, first_interval=0.2)
 
 
+    def _schedule_workspace_setup() -> None:
+        if not bpy.app.timers.is_registered(_bootstrap_codex_workspace):
+            bpy.app.timers.register(_bootstrap_codex_workspace, first_interval=0.1)
+
+
     def _ensure_prompt_text_block(wm: bpy.types.WindowManager) -> bpy.types.Text:
         name = wm.codex_unsafe_prompt_text_name or _DEFAULT_PROMPT_TEXT_NAME
         text_block = bpy.data.texts.get(name)
@@ -82,6 +89,90 @@ else:
     def _prompt_text(wm: bpy.types.WindowManager) -> str:
         text_block = bpy.data.texts.get(wm.codex_unsafe_prompt_text_name)
         return text_block.as_string() if text_block is not None else ""
+
+
+    def _status_icon(status: str) -> str:
+        return {
+            "completed": "CHECKMARK",
+            "failed": "ERROR",
+            "running": "PLAY",
+            "starting": "PLAY",
+            "queued": "TIME",
+            "connected": "CHECKMARK",
+            "disconnected": "PANEL_CLOSE",
+            "error": "ERROR",
+        }.get(status, "INFO")
+
+
+    def _status_label(wm: bpy.types.WindowManager) -> str:
+        status = wm.codex_unsafe_status or "disconnected"
+        if status in {"running", "starting"}:
+            frame = _SPINNER_FRAMES[wm.codex_unsafe_spinner_index % len(_SPINNER_FRAMES)]
+            return f"Codex is working {frame}"
+        if status == "completed":
+            return "Completed"
+        if status == "connected":
+            return "Connected"
+        if status == "error":
+            return "Error"
+        return status.title()
+
+
+    def _find_workspace(name: str) -> bpy.types.WorkSpace | None:
+        for workspace in bpy.data.workspaces:
+            if workspace.name == name:
+                return workspace
+        return None
+
+
+    def _configure_codex_workspace(workspace: bpy.types.WorkSpace) -> None:
+        text_block = _ensure_prompt_text_block(bpy.context.window_manager)
+        for screen in workspace.screens:
+            for area in screen.areas:
+                if area.type == "DOPESHEET_EDITOR":
+                    area.type = "TEXT_EDITOR"
+                if area.type == "TEXT_EDITOR":
+                    text_space = next(
+                        (space for space in area.spaces if hasattr(space, "text")),
+                        None,
+                    )
+                    if text_space is not None:
+                        text_space.text = text_block
+                    if text_space is not None and hasattr(text_space, "show_region_ui"):
+                        text_space.show_region_ui = True
+                if area.type == "VIEW_3D" and hasattr(area.spaces.active, "show_region_ui"):
+                    area.spaces.active.show_region_ui = True
+
+
+    def _ensure_codex_workspace() -> bpy.types.WorkSpace | None:
+        workspace = _find_workspace(_WORKSPACE_NAME)
+        if workspace is None:
+            layout = _find_workspace("Layout")
+            if layout is None:
+                return None
+            window = bpy.context.window
+            if window is None:
+                return None
+            previous_workspace = window.workspace
+            existing_names = {item.name for item in bpy.data.workspaces}
+            window.workspace = layout
+            bpy.ops.workspace.duplicate()
+            new_workspaces = [item for item in bpy.data.workspaces if item.name not in existing_names]
+            workspace = new_workspaces[0] if new_workspaces else None
+            window.workspace = previous_workspace
+            if workspace is None:
+                return None
+            workspace.name = _WORKSPACE_NAME
+        _configure_codex_workspace(workspace)
+        return workspace
+
+
+    def _bootstrap_codex_workspace() -> None:
+        try:
+            _ensure_codex_workspace()
+        except Exception:
+            pass
+        return None
 
 
     def _message_summary(body: str) -> str:
@@ -121,6 +212,10 @@ else:
         wm = bpy.context.window_manager
         wm.codex_unsafe_status = bridge.get_status()
         wm.codex_unsafe_event_log = "\n".join(bridge.get_events()[-40:])
+        if wm.codex_unsafe_status in {"running", "starting"}:
+            wm.codex_unsafe_spinner_index = (wm.codex_unsafe_spinner_index + 1) % len(_SPINNER_FRAMES)
+        else:
+            wm.codex_unsafe_spinner_index = 0
 
         ui_items = bridge.get_ui_items()
         wm.codex_unsafe_messages.clear()
@@ -236,43 +331,18 @@ else:
             return {"FINISHED"}
 
 
-    class CODEX_OT_unsafe_open_prompt_editor(bpy.types.Operator):
-        bl_idname = "codex_unsafe.open_prompt_editor"
-        bl_label = "Open Prompt Editor"
+    class CODEX_OT_unsafe_open_workspace(bpy.types.Operator):
+        bl_idname = "codex_unsafe.open_workspace"
+        bl_label = "Open Codex Workspace"
 
         def execute(self, context: bpy.types.Context):
-            wm = context.window_manager
-            text_block = _ensure_prompt_text_block(wm)
-            before = {window.as_pointer() for window in wm.windows}
-
-            try:
-                override = {
-                    "window": context.window,
-                    "screen": context.screen,
-                    "area": context.area,
-                    "region": context.region,
-                }
-                bpy.ops.screen.area_dupli(override, "EXEC_DEFAULT")
-            except Exception:
-                self.report({"WARNING"}, "Could not create a detached prompt window")
+            workspace = _ensure_codex_workspace()
+            if workspace is None:
+                self.report({"WARNING"}, "Could not prepare the Codex workspace")
                 return {"CANCELLED"}
-
-            new_window = None
-            for window in wm.windows:
-                if window.as_pointer() not in before:
-                    new_window = window
-                    break
-
-            if new_window is None:
-                self.report({"WARNING"}, "Prompt window did not open")
-                return {"CANCELLED"}
-
-            area = new_window.screen.areas[0]
-            area.type = "TEXT_EDITOR"
-            area.spaces.active.text = text_block
-            if hasattr(area.spaces.active, "show_region_ui"):
-                area.spaces.active.show_region_ui = True
-            self.report({"INFO"}, f"Opened prompt editor for {text_block.name}")
+            context.window.workspace = workspace
+            _configure_codex_workspace(workspace)
+            self.report({"INFO"}, "Opened Codex workspace")
             return {"FINISHED"}
 
 
@@ -332,24 +402,37 @@ else:
             session.prop(wm, "codex_unsafe_model")
             session.prop(wm, "codex_unsafe_cwd")
             row = session.row(align=True)
+            row.operator("codex_unsafe.open_workspace", text="Open Codex")
             row.operator("codex_unsafe.connect", text="Connect")
+            row = session.row(align=True)
             row.operator("codex_unsafe.disconnect", text="Disconnect")
             row.operator("codex_unsafe.interrupt", text="Interrupt")
-            session.label(text=f"Status: {wm.codex_unsafe_status}")
+            session.label(text=_status_label(wm), icon=_status_icon(wm.codex_unsafe_status))
             if bridge and bridge.thread_id:
                 session.label(text=f"Thread: {bridge.thread_id}")
 
             prompt = layout.box()
-            prompt.label(text="Prompt Editor", icon="TEXT")
+            prompt.label(text="Prompt Workspace", icon="TEXT")
             prompt.prop_search(wm, "codex_unsafe_prompt_text_name", bpy.data, "texts", text="Text")
             row = prompt.row(align=True)
             row.operator("codex_unsafe.prepare_prompt_text", text="Prepare")
-            row.operator("codex_unsafe.open_prompt_editor", text="Open Window")
+            row.operator("codex_unsafe.open_workspace", text="Open Codex")
             row.operator("codex_unsafe.send_prompt", text="Send")
-            prompt.label(text="Type your prompt in the Blender Text Editor window for the selected text block.")
+            prompt.label(text="The Codex workspace uses the bottom editor area as the prompt composer.")
             preview = prompt.box()
             preview.label(text="Composer Preview")
-            _draw_wrapped_text(preview, _prompt_text(wm), width=72, limit=10)
+            _draw_wrapped_text(preview, _prompt_text(wm), width=72, limit=8)
+
+            steps = layout.box()
+            steps.label(text="Steps", icon="CHECKMARK")
+            step_items = [item for item in wm.codex_unsafe_messages if item.kind == "tool"]
+            if not step_items:
+                steps.label(text="No tool steps yet.")
+            else:
+                for step_item in step_items[-8:]:
+                    row = steps.row(align=True)
+                    row.label(text=step_item.title, icon=_status_icon(step_item.status))
+                    row.label(text=step_item.status or "idle")
 
             transcript = layout.box()
             transcript.label(text="Conversation", icon="WORDWRAP_ON")
@@ -398,7 +481,10 @@ else:
             row = box.row(align=True)
             row.operator("codex_unsafe.send_prompt", text="Send")
             row.operator("codex_unsafe.connect", text="Connect")
-            box.label(text=f"Status: {wm.codex_unsafe_status}")
+            row = box.row(align=True)
+            row.operator("codex_unsafe.interrupt", text="Interrupt")
+            row.operator("codex_unsafe.open_workspace", text="Show Workspace")
+            box.label(text=_status_label(wm), icon=_status_icon(wm.codex_unsafe_status))
             if _BRIDGE and _BRIDGE.thread_id:
                 box.label(text=f"Thread: {_BRIDGE.thread_id}")
 
@@ -409,7 +495,7 @@ else:
         CODEX_OT_unsafe_connect,
         CODEX_OT_unsafe_disconnect,
         CODEX_OT_unsafe_prepare_prompt_text,
-        CODEX_OT_unsafe_open_prompt_editor,
+        CODEX_OT_unsafe_open_workspace,
         CODEX_OT_unsafe_send_prompt,
         CODEX_OT_unsafe_interrupt,
         VIEW3D_PT_codex_unsafe,
@@ -438,6 +524,10 @@ else:
             name="Status",
             default="disconnected",
         )
+        bpy.types.WindowManager.codex_unsafe_spinner_index = bpy.props.IntProperty(
+            name="Spinner Index",
+            default=0,
+        )
         bpy.types.WindowManager.codex_unsafe_event_log = bpy.props.StringProperty(
             name="Event Log",
             default="",
@@ -451,6 +541,7 @@ else:
         )
 
         _ensure_timer()
+        _schedule_workspace_setup()
 
 
     def unregister():
@@ -462,6 +553,7 @@ else:
         del bpy.types.WindowManager.codex_unsafe_message_index
         del bpy.types.WindowManager.codex_unsafe_messages
         del bpy.types.WindowManager.codex_unsafe_event_log
+        del bpy.types.WindowManager.codex_unsafe_spinner_index
         del bpy.types.WindowManager.codex_unsafe_status
         del bpy.types.WindowManager.codex_unsafe_prompt_text_name
         del bpy.types.WindowManager.codex_unsafe_cwd
