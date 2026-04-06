@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import textwrap
+
 try:
     import bpy  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover - expected outside Blender
@@ -12,7 +13,7 @@ from .app_server import CodexAppServerClient, default_workspace
 bl_info = {
     "name": "Codex Blender Unsafe",
     "author": "OpenAI Codex",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Codex Unsafe",
     "description": "Unsafe live Codex App Server integration for Blender 3.0",
@@ -21,6 +22,12 @@ bl_info = {
 
 
 _BRIDGE: CodexAppServerClient | None = None
+_DEFAULT_PROMPT_TEXT_NAME = "Codex Prompt"
+_DEFAULT_PROMPT_TEXT = (
+    "Inspect the current scene and explain what you can change.\n"
+    "Prefer the structured Blender tools before blender_run_python."
+)
+_DEFAULT_INLINE_PROMPT = "Inspect the current scene and explain what you can change."
 
 
 def _workspace_default() -> str:
@@ -61,6 +68,49 @@ else:
             bpy.app.timers.register(_pump_bridge, first_interval=0.2)
 
 
+    def _ensure_prompt_text_block(wm: bpy.types.WindowManager) -> bpy.types.Text:
+        name = wm.codex_unsafe_prompt_text_name or _DEFAULT_PROMPT_TEXT_NAME
+        text_block = bpy.data.texts.get(name)
+        if text_block is None:
+            text_block = bpy.data.texts.new(name)
+            text_block.write(_DEFAULT_PROMPT_TEXT)
+        elif not text_block.as_string().strip():
+            text_block.write(_DEFAULT_PROMPT_TEXT)
+        wm.codex_unsafe_prompt_text_name = text_block.name
+        return text_block
+
+
+    def _prompt_text(wm: bpy.types.WindowManager) -> str:
+        text_block = bpy.data.texts.get(wm.codex_unsafe_prompt_text_name)
+        return text_block.as_string() if text_block is not None else ""
+
+
+    def _active_prompt(wm: bpy.types.WindowManager) -> str:
+        inline = (wm.codex_unsafe_prompt_inline or "").strip()
+        if inline:
+            return inline
+        return _prompt_text(wm).strip()
+
+
+    def _message_summary(body: str) -> str:
+        first_line = (body or "").strip().splitlines()[0] if (body or "").strip() else ""
+        if not first_line:
+            return "(empty)"
+        if len(first_line) > 72:
+            return first_line[:69] + "..."
+        return first_line
+
+
+    def _message_icon(role: str, kind: str) -> str:
+        if kind == "tool":
+            return "TOOL_SETTINGS"
+        if role == "user":
+            return "USER"
+        if role == "assistant":
+            return "CONSOLE"
+        return "INFO"
+
+
     def _pump_bridge() -> float | None:
         bridge = _BRIDGE
         if bridge is None:
@@ -78,8 +128,78 @@ else:
     def _sync_window_manager_state(bridge: CodexAppServerClient) -> None:
         wm = bpy.context.window_manager
         wm.codex_unsafe_status = bridge.get_status()
-        wm.codex_unsafe_output = bridge.get_assistant_text()
-        wm.codex_unsafe_event_log = "\n".join(bridge.get_events()[-20:])
+        wm.codex_unsafe_event_log = "\n".join(bridge.get_events()[-40:])
+
+        ui_items = bridge.get_ui_items()
+        wm.codex_unsafe_messages.clear()
+        for data in ui_items:
+            item = wm.codex_unsafe_messages.add()
+            item.message_id = data.get("id", "")
+            item.role = data.get("role", "")
+            item.kind = data.get("kind", "")
+            item.title = data.get("title", "")
+            item.body = data.get("body", "")
+            item.status = data.get("status", "")
+            item.summary = _message_summary(item.body or item.title)
+
+        if wm.codex_unsafe_messages:
+            wm.codex_unsafe_message_index = min(
+                max(wm.codex_unsafe_message_index, 0),
+                len(wm.codex_unsafe_messages) - 1,
+            )
+        else:
+            wm.codex_unsafe_message_index = 0
+
+
+    def _draw_wrapped_text(layout: bpy.types.UILayout, text: str, width: int = 72, limit: int = 32) -> None:
+        lines_drawn = 0
+        if not text:
+            layout.label(text="(empty)")
+            return
+        for raw_line in text.splitlines() or [""]:
+            wrapped = textwrap.wrap(raw_line, width=width) or [""]
+            for line in wrapped:
+                layout.label(text=line[:160])
+                lines_drawn += 1
+                if lines_drawn >= limit:
+                    layout.label(text="...")
+                    return
+
+
+    class CODEX_PG_message(bpy.types.PropertyGroup):
+        message_id: bpy.props.StringProperty(name="Message Id")
+        role: bpy.props.StringProperty(name="Role")
+        kind: bpy.props.StringProperty(name="Kind")
+        title: bpy.props.StringProperty(name="Title")
+        summary: bpy.props.StringProperty(name="Summary")
+        body: bpy.props.StringProperty(name="Body")
+        status: bpy.props.StringProperty(name="Status")
+
+
+    class CODEX_UL_messages(bpy.types.UIList):
+        bl_idname = "CODEX_UL_messages"
+
+        def draw_item(
+            self,
+            context: bpy.types.Context,
+            layout: bpy.types.UILayout,
+            data: bpy.types.WindowManager,
+            item: CODEX_PG_message,
+            icon: int,
+            active_data: bpy.types.WindowManager,
+            active_propname: str,
+            index: int,
+        ) -> None:
+            icon_name = _message_icon(item.role, item.kind)
+            if self.layout_type in {"DEFAULT", "COMPACT"}:
+                row = layout.row(align=True)
+                row.label(text=item.title or item.role.title(), icon=icon_name)
+                row.label(text=item.summary)
+                if item.status:
+                    row.label(text=item.status)
+            elif self.layout_type == "GRID":
+                layout.alignment = "CENTER"
+                layout.label(text="", icon=icon_name)
 
 
     class CODEX_OT_unsafe_connect(bpy.types.Operator):
@@ -88,13 +208,14 @@ else:
 
         def execute(self, context: bpy.types.Context):
             bridge = _get_bridge()
-            bridge.set_cwd(context.window_manager.codex_unsafe_cwd or _workspace_default())
-            bridge.set_model(context.window_manager.codex_unsafe_model or "gpt-5.4")
+            wm = context.window_manager
+            bridge.set_cwd(wm.codex_unsafe_cwd or _workspace_default())
+            bridge.set_model(wm.codex_unsafe_model or "gpt-5.4")
             try:
                 bridge.start()
             except Exception as exc:
                 self.report({"ERROR"}, str(exc))
-                context.window_manager.codex_unsafe_status = f"error: {exc}"
+                wm.codex_unsafe_status = f"error: {exc}"
                 return {"CANCELLED"}
 
             _ensure_timer()
@@ -109,6 +230,30 @@ else:
         def execute(self, context: bpy.types.Context):
             _reset_bridge()
             context.window_manager.codex_unsafe_status = "disconnected"
+            context.window_manager.codex_unsafe_messages.clear()
+            return {"FINISHED"}
+
+
+    class CODEX_OT_unsafe_prepare_prompt_text(bpy.types.Operator):
+        bl_idname = "codex_unsafe.prepare_prompt_text"
+        bl_label = "Prepare Prompt Text"
+
+        def execute(self, context: bpy.types.Context):
+            text_block = _ensure_prompt_text_block(context.window_manager)
+            self.report({"INFO"}, f"Prompt text ready: {text_block.name}")
+            return {"FINISHED"}
+
+
+    class CODEX_OT_unsafe_copy_prompt_to_text(bpy.types.Operator):
+        bl_idname = "codex_unsafe.copy_prompt_to_text"
+        bl_label = "Copy Inline To Text"
+
+        def execute(self, context: bpy.types.Context):
+            wm = context.window_manager
+            text_block = _ensure_prompt_text_block(wm)
+            text_block.clear()
+            text_block.write(wm.codex_unsafe_prompt_inline or _DEFAULT_PROMPT_TEXT)
+            self.report({"INFO"}, f"Copied inline prompt to {text_block.name}")
             return {"FINISHED"}
 
 
@@ -118,16 +263,20 @@ else:
 
         def execute(self, context: bpy.types.Context):
             bridge = _get_bridge()
-            prompt = context.window_manager.codex_unsafe_prompt
-            bridge.set_cwd(context.window_manager.codex_unsafe_cwd or _workspace_default())
-            bridge.set_model(context.window_manager.codex_unsafe_model or "gpt-5.4")
+            wm = context.window_manager
+            prompt = _active_prompt(wm)
+            if not prompt:
+                text_block = _ensure_prompt_text_block(wm)
+                prompt = text_block.as_string().strip()
+            bridge.set_cwd(wm.codex_unsafe_cwd or _workspace_default())
+            bridge.set_model(wm.codex_unsafe_model or "gpt-5.4")
             try:
                 if not bridge.is_running:
                     bridge.start()
                 bridge.send_prompt(prompt)
             except Exception as exc:
                 self.report({"ERROR"}, str(exc))
-                context.window_manager.codex_unsafe_status = f"error: {exc}"
+                wm.codex_unsafe_status = f"error: {exc}"
                 return {"CANCELLED"}
 
             _ensure_timer()
@@ -149,16 +298,6 @@ else:
             return {"FINISHED"}
 
 
-    class CODEX_OT_unsafe_clear_output(bpy.types.Operator):
-        bl_idname = "codex_unsafe.clear_output"
-        bl_label = "Clear Output"
-
-        def execute(self, context: bpy.types.Context):
-            context.window_manager.codex_unsafe_output = ""
-            context.window_manager.codex_unsafe_event_log = ""
-            return {"FINISHED"}
-
-
     class VIEW3D_PT_codex_unsafe(bpy.types.Panel):
         bl_label = "Codex Unsafe"
         bl_idname = "VIEW3D_PT_codex_unsafe"
@@ -171,46 +310,65 @@ else:
             wm = context.window_manager
             bridge = _BRIDGE
 
-            col = layout.column(align=True)
-            col.prop(wm, "codex_unsafe_model")
-            col.prop(wm, "codex_unsafe_cwd")
-
-            row = layout.row(align=True)
+            session = layout.box()
+            session.label(text="Session", icon="PLUGIN")
+            session.prop(wm, "codex_unsafe_model")
+            session.prop(wm, "codex_unsafe_cwd")
+            row = session.row(align=True)
             row.operator("codex_unsafe.connect", text="Connect")
             row.operator("codex_unsafe.disconnect", text="Disconnect")
-
-            row = layout.row(align=True)
-            row.operator("codex_unsafe.send_prompt", text="Send Prompt")
             row.operator("codex_unsafe.interrupt", text="Interrupt")
-
-            layout.operator("codex_unsafe.clear_output", text="Clear Output")
-
-            layout.label(text=f"Status: {wm.codex_unsafe_status}")
+            session.label(text=f"Status: {wm.codex_unsafe_status}")
             if bridge and bridge.thread_id:
-                layout.label(text=f"Thread: {bridge.thread_id}")
+                session.label(text=f"Thread: {bridge.thread_id}")
 
-            layout.prop(wm, "codex_unsafe_prompt", text="Prompt")
+            prompt = layout.box()
+            prompt.label(text="Prompt", icon="TEXT")
+            prompt.prop(wm, "codex_unsafe_prompt_inline", text="Quick Prompt")
+            prompt.prop_search(wm, "codex_unsafe_prompt_text_name", bpy.data, "texts", text="Text")
+            row = prompt.row(align=True)
+            row.operator("codex_unsafe.prepare_prompt_text", text="Prepare")
+            row.operator("codex_unsafe.copy_prompt_to_text", text="Copy To Text")
+            row = prompt.row(align=True)
+            row.operator("codex_unsafe.send_prompt", text="Send")
+            prompt.label(text="Use Quick Prompt for short prompts, or edit the text block for longer prompts.")
+            preview = prompt.box()
+            preview.label(text="Composer Preview")
+            _draw_wrapped_text(preview, _active_prompt(wm), width=72, limit=10)
 
-            self._draw_text_block(layout, "Assistant", wm.codex_unsafe_output)
-            self._draw_text_block(layout, "Event Log", wm.codex_unsafe_event_log)
+            transcript = layout.box()
+            transcript.label(text="Conversation", icon="WORDWRAP_ON")
+            transcript.template_list(
+                "CODEX_UL_messages",
+                "",
+                wm,
+                "codex_unsafe_messages",
+                wm,
+                "codex_unsafe_message_index",
+                rows=8,
+            )
+            if wm.codex_unsafe_messages:
+                selected = wm.codex_unsafe_messages[wm.codex_unsafe_message_index]
+                detail = transcript.box()
+                detail.label(text=f"{selected.title} [{selected.status or 'idle'}]", icon=_message_icon(selected.role, selected.kind))
+                _draw_wrapped_text(detail, selected.body, width=78, limit=20)
+            else:
+                transcript.label(text="No conversation yet.")
 
-        def _draw_text_block(self, layout: bpy.types.UILayout, title: str, text: str):
-            box = layout.box()
-            box.label(text=title)
-            if not text:
-                box.label(text="(empty)")
-                return
-            for raw_line in text.splitlines()[:24]:
-                for wrapped in textwrap.wrap(raw_line, width=72) or [""]:
-                    box.label(text=wrapped[:120])
+            activity = layout.box()
+            activity.label(text="Activity", icon="INFO")
+            _draw_wrapped_text(activity, wm.codex_unsafe_event_log, width=78, limit=14)
 
 
     classes = (
+        CODEX_PG_message,
+        CODEX_UL_messages,
         CODEX_OT_unsafe_connect,
         CODEX_OT_unsafe_disconnect,
+        CODEX_OT_unsafe_prepare_prompt_text,
+        CODEX_OT_unsafe_copy_prompt_to_text,
         CODEX_OT_unsafe_send_prompt,
         CODEX_OT_unsafe_interrupt,
-        CODEX_OT_unsafe_clear_output,
         VIEW3D_PT_codex_unsafe,
     )
 
@@ -219,11 +377,6 @@ else:
         for cls in classes:
             bpy.utils.register_class(cls)
 
-        bpy.types.WindowManager.codex_unsafe_prompt = bpy.props.StringProperty(
-            name="Prompt",
-            description="Prompt sent to Codex",
-            default="Inspect the current scene and explain what you can change.",
-        )
         bpy.types.WindowManager.codex_unsafe_model = bpy.props.StringProperty(
             name="Model",
             default="gpt-5.4",
@@ -233,17 +386,28 @@ else:
             default=_workspace_default(),
             subtype="DIR_PATH",
         )
+        bpy.types.WindowManager.codex_unsafe_prompt_text_name = bpy.props.StringProperty(
+            name="Prompt Text",
+            default=_DEFAULT_PROMPT_TEXT_NAME,
+        )
+        bpy.types.WindowManager.codex_unsafe_prompt_inline = bpy.props.StringProperty(
+            name="Quick Prompt",
+            default=_DEFAULT_INLINE_PROMPT,
+        )
         bpy.types.WindowManager.codex_unsafe_status = bpy.props.StringProperty(
             name="Status",
             default="disconnected",
         )
-        bpy.types.WindowManager.codex_unsafe_output = bpy.props.StringProperty(
-            name="Assistant Output",
-            default="",
-        )
         bpy.types.WindowManager.codex_unsafe_event_log = bpy.props.StringProperty(
             name="Event Log",
             default="",
+        )
+        bpy.types.WindowManager.codex_unsafe_messages = bpy.props.CollectionProperty(
+            type=CODEX_PG_message,
+        )
+        bpy.types.WindowManager.codex_unsafe_message_index = bpy.props.IntProperty(
+            name="Conversation Index",
+            default=0,
         )
 
         _ensure_timer()
@@ -255,12 +419,14 @@ else:
 
         _reset_bridge()
 
+        del bpy.types.WindowManager.codex_unsafe_message_index
+        del bpy.types.WindowManager.codex_unsafe_messages
         del bpy.types.WindowManager.codex_unsafe_event_log
-        del bpy.types.WindowManager.codex_unsafe_output
         del bpy.types.WindowManager.codex_unsafe_status
+        del bpy.types.WindowManager.codex_unsafe_prompt_inline
+        del bpy.types.WindowManager.codex_unsafe_prompt_text_name
         del bpy.types.WindowManager.codex_unsafe_cwd
         del bpy.types.WindowManager.codex_unsafe_model
-        del bpy.types.WindowManager.codex_unsafe_prompt
 
         for cls in reversed(classes):
             bpy.utils.unregister_class(cls)

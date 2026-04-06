@@ -26,7 +26,9 @@ def wait_for_turn(client: CodexAppServerClient, timeout_s: float = 45.0) -> None
         if status not in {"running", "starting"}:
             return
         time.sleep(0.2)
-    raise TimeoutError(f"Turn did not finish within {timeout_s} seconds")
+    raise TimeoutError(
+        f"Turn did not finish within {timeout_s} seconds\nRecent events:\n" + "\n".join(client.get_events()[-20:])
+    )
 
 
 def main() -> int:
@@ -34,6 +36,7 @@ def main() -> int:
 
     workspace = str(REPO_ROOT)
     client = CodexAppServerClient(cwd=workspace, model="gpt-5.4")
+    timeout_s = float(os.environ.get("CODEX_BLENDER_TEST_TIMEOUT", "45"))
     try:
         client.start()
         prompt = (
@@ -44,7 +47,7 @@ def main() -> int:
             "Then call blender_get_object_info for CodexTestSphere and report its material and location."
         )
         client.send_prompt(prompt)
-        wait_for_turn(client)
+        wait_for_turn(client, timeout_s=timeout_s)
 
         sphere = bpy.data.objects.get("CodexTestSphere")
         material = bpy.data.materials.get("CodexRed")

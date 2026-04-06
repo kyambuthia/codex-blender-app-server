@@ -62,6 +62,11 @@ class CodexAppServerClient:
         self._thread_id: Optional[str] = None
         self._active_turn_id: Optional[str] = None
         self._stop_event = threading.Event()
+        self._ui_lock = threading.Lock()
+        self._ui_items: deque[dict[str, Any]] = deque(maxlen=200)
+        self._ui_serial = 1
+        self._active_assistant_item_id: Optional[str] = None
+        self._tool_item_ids: dict[str, str] = {}
 
     @property
     def thread_id(self) -> Optional[str]:
@@ -80,6 +85,10 @@ class CodexAppServerClient:
     def get_events(self) -> list[str]:
         return list(self._events)
 
+    def get_ui_items(self) -> list[dict[str, Any]]:
+        with self._ui_lock:
+            return [dict(item) for item in self._ui_items]
+
     def set_cwd(self, cwd: str) -> None:
         self.cwd = os.path.abspath(cwd)
 
@@ -94,7 +103,11 @@ class CodexAppServerClient:
         self._assistant_text = ""
         self._thread_id = None
         self._active_turn_id = None
+        self._active_assistant_item_id = None
+        self._tool_item_ids = {}
         self._status = "starting"
+        with self._ui_lock:
+            self._ui_items.clear()
         self._log("starting codex app-server")
 
         self._process = subprocess.Popen(
@@ -179,6 +192,13 @@ class CodexAppServerClient:
 
         self._assistant_text = ""
         self._status = "running"
+        self._append_ui_item(
+            kind="user",
+            role="user",
+            title="You",
+            body=prompt,
+            status="completed",
+        )
         result = self._request(
             "turn/start",
             {
@@ -219,6 +239,7 @@ class CodexAppServerClient:
 
             processed += 1
             try:
+                self._update_tool_item(pending.call_id, status="running")
                 result = tool_runner(pending.tool, pending.arguments)
                 payload = {
                     "contentItems": result.get("contentItems", []),
@@ -234,6 +255,11 @@ class CodexAppServerClient:
                         }
                     ],
                 }
+            self._update_tool_item(
+                pending.call_id,
+                status="completed" if payload["success"] else "failed",
+                body=self._format_tool_result(payload),
+            )
             self._send_response(pending.request_id, payload)
 
         return processed
@@ -306,6 +332,14 @@ class CodexAppServerClient:
                 call_id=params["callId"],
             )
             self._log(f"tool call {queued.tool}")
+            item_id = self._append_ui_item(
+                kind="tool",
+                role="tool",
+                title=queued.tool,
+                body=self._format_arguments(queued.arguments),
+                status="queued",
+            )
+            self._tool_item_ids[queued.call_id] = item_id
             self._tool_queue.put(queued)
             return
 
@@ -355,6 +389,13 @@ class CodexAppServerClient:
             self._active_turn_id = turn.get("id")
             self._assistant_text = ""
             self._status = "running"
+            self._active_assistant_item_id = self._append_ui_item(
+                kind="assistant",
+                role="assistant",
+                title="Codex",
+                body="",
+                status="running",
+            )
             self._log(f"turn started {self._active_turn_id}")
             return
 
@@ -362,18 +403,28 @@ class CodexAppServerClient:
             turn = params.get("turn", {})
             self._active_turn_id = turn.get("id")
             self._status = turn.get("status", "connected")
+            if self._active_assistant_item_id:
+                self._update_ui_item(self._active_assistant_item_id, status=self._status)
             self._log(f"turn completed with status {self._status}")
             return
 
         if method == "item/agentMessage/delta":
             delta = params.get("delta", "")
             self._assistant_text += delta
+            if self._active_assistant_item_id:
+                self._update_ui_item(self._active_assistant_item_id, body=self._assistant_text)
             return
 
         if method == "item/completed":
             item = params.get("item", {})
             if item.get("type") == "agentMessage":
                 self._assistant_text = item.get("text", self._assistant_text)
+                if self._active_assistant_item_id:
+                    self._update_ui_item(
+                        self._active_assistant_item_id,
+                        body=self._assistant_text,
+                        status="completed",
+                    )
             return
 
         if method == "error":
@@ -456,6 +507,65 @@ class CodexAppServerClient:
     def _log(self, message: str) -> None:
         stamp = time.strftime("%H:%M:%S")
         self._events.append(f"[{stamp}] {message}")
+
+    def _append_ui_item(
+        self,
+        *,
+        kind: str,
+        role: str,
+        title: str,
+        body: str,
+        status: str,
+    ) -> str:
+        with self._ui_lock:
+            item_id = f"ui_{self._ui_serial}"
+            self._ui_serial += 1
+            self._ui_items.append(
+                {
+                    "id": item_id,
+                    "kind": kind,
+                    "role": role,
+                    "title": title,
+                    "body": body,
+                    "status": status,
+                }
+            )
+            return item_id
+
+    def _update_ui_item(self, item_id: str, **updates: Any) -> None:
+        with self._ui_lock:
+            for item in self._ui_items:
+                if item["id"] == item_id:
+                    item.update(updates)
+                    return
+
+    def _update_tool_item(self, call_id: str, *, status: str, body: str | None = None) -> None:
+        item_id = self._tool_item_ids.get(call_id)
+        if not item_id:
+            return
+        updates: dict[str, Any] = {"status": status}
+        if body is not None:
+            updates["body"] = body
+        self._update_ui_item(item_id, **updates)
+
+    def _format_arguments(self, arguments: Any) -> str:
+        if arguments in (None, {}):
+            return ""
+        try:
+            return json.dumps(arguments, indent=2, sort_keys=True)
+        except TypeError:
+            return str(arguments)
+
+    def _format_tool_result(self, payload: dict[str, Any]) -> str:
+        content_items = payload.get("contentItems", [])
+        chunks = []
+        for item in content_items:
+            if item.get("type") == "inputText":
+                chunks.append(item.get("text", ""))
+        text = "\n\n".join(chunk for chunk in chunks if chunk)
+        if not text:
+            text = json.dumps(payload, indent=2, sort_keys=True)
+        return text
 
     def _dynamic_tools(self) -> list[dict[str, Any]]:
         return [
