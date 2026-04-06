@@ -13,7 +13,7 @@ from .app_server import CodexAppServerClient, default_workspace
 bl_info = {
     "name": "Codex Blender Unsafe",
     "author": "OpenAI Codex",
-    "version": (0, 2, 0),
+    "version": (0, 3, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Codex Unsafe",
     "description": "Unsafe live Codex App Server integration for Blender 3.0",
@@ -27,7 +27,6 @@ _DEFAULT_PROMPT_TEXT = (
     "Inspect the current scene and explain what you can change.\n"
     "Prefer the structured Blender tools before blender_run_python."
 )
-_DEFAULT_INLINE_PROMPT = "Inspect the current scene and explain what you can change."
 
 
 def _workspace_default() -> str:
@@ -83,13 +82,6 @@ else:
     def _prompt_text(wm: bpy.types.WindowManager) -> str:
         text_block = bpy.data.texts.get(wm.codex_unsafe_prompt_text_name)
         return text_block.as_string() if text_block is not None else ""
-
-
-    def _active_prompt(wm: bpy.types.WindowManager) -> str:
-        inline = (wm.codex_unsafe_prompt_inline or "").strip()
-        if inline:
-            return inline
-        return _prompt_text(wm).strip()
 
 
     def _message_summary(body: str) -> str:
@@ -244,16 +236,43 @@ else:
             return {"FINISHED"}
 
 
-    class CODEX_OT_unsafe_copy_prompt_to_text(bpy.types.Operator):
-        bl_idname = "codex_unsafe.copy_prompt_to_text"
-        bl_label = "Copy Inline To Text"
+    class CODEX_OT_unsafe_open_prompt_editor(bpy.types.Operator):
+        bl_idname = "codex_unsafe.open_prompt_editor"
+        bl_label = "Open Prompt Editor"
 
         def execute(self, context: bpy.types.Context):
             wm = context.window_manager
             text_block = _ensure_prompt_text_block(wm)
-            text_block.clear()
-            text_block.write(wm.codex_unsafe_prompt_inline or _DEFAULT_PROMPT_TEXT)
-            self.report({"INFO"}, f"Copied inline prompt to {text_block.name}")
+            before = {window.as_pointer() for window in wm.windows}
+
+            try:
+                override = {
+                    "window": context.window,
+                    "screen": context.screen,
+                    "area": context.area,
+                    "region": context.region,
+                }
+                bpy.ops.screen.area_dupli(override, "EXEC_DEFAULT")
+            except Exception:
+                self.report({"WARNING"}, "Could not create a detached prompt window")
+                return {"CANCELLED"}
+
+            new_window = None
+            for window in wm.windows:
+                if window.as_pointer() not in before:
+                    new_window = window
+                    break
+
+            if new_window is None:
+                self.report({"WARNING"}, "Prompt window did not open")
+                return {"CANCELLED"}
+
+            area = new_window.screen.areas[0]
+            area.type = "TEXT_EDITOR"
+            area.spaces.active.text = text_block
+            if hasattr(area.spaces.active, "show_region_ui"):
+                area.spaces.active.show_region_ui = True
+            self.report({"INFO"}, f"Opened prompt editor for {text_block.name}")
             return {"FINISHED"}
 
 
@@ -264,10 +283,8 @@ else:
         def execute(self, context: bpy.types.Context):
             bridge = _get_bridge()
             wm = context.window_manager
-            prompt = _active_prompt(wm)
-            if not prompt:
-                text_block = _ensure_prompt_text_block(wm)
-                prompt = text_block.as_string().strip()
+            text_block = _ensure_prompt_text_block(wm)
+            prompt = text_block.as_string().strip()
             bridge.set_cwd(wm.codex_unsafe_cwd or _workspace_default())
             bridge.set_model(wm.codex_unsafe_model or "gpt-5.4")
             try:
@@ -323,18 +340,16 @@ else:
                 session.label(text=f"Thread: {bridge.thread_id}")
 
             prompt = layout.box()
-            prompt.label(text="Prompt", icon="TEXT")
-            prompt.prop(wm, "codex_unsafe_prompt_inline", text="Quick Prompt")
+            prompt.label(text="Prompt Editor", icon="TEXT")
             prompt.prop_search(wm, "codex_unsafe_prompt_text_name", bpy.data, "texts", text="Text")
             row = prompt.row(align=True)
             row.operator("codex_unsafe.prepare_prompt_text", text="Prepare")
-            row.operator("codex_unsafe.copy_prompt_to_text", text="Copy To Text")
-            row = prompt.row(align=True)
+            row.operator("codex_unsafe.open_prompt_editor", text="Open Window")
             row.operator("codex_unsafe.send_prompt", text="Send")
-            prompt.label(text="Use Quick Prompt for short prompts, or edit the text block for longer prompts.")
+            prompt.label(text="Type your prompt in the Blender Text Editor window for the selected text block.")
             preview = prompt.box()
             preview.label(text="Composer Preview")
-            _draw_wrapped_text(preview, _active_prompt(wm), width=72, limit=10)
+            _draw_wrapped_text(preview, _prompt_text(wm), width=72, limit=10)
 
             transcript = layout.box()
             transcript.label(text="Conversation", icon="WORDWRAP_ON")
@@ -360,16 +375,45 @@ else:
             _draw_wrapped_text(activity, wm.codex_unsafe_event_log, width=78, limit=14)
 
 
+    class TEXTEDITOR_PT_codex_unsafe(bpy.types.Panel):
+        bl_label = "Codex Prompt"
+        bl_idname = "TEXTEDITOR_PT_codex_unsafe"
+        bl_space_type = "TEXT_EDITOR"
+        bl_region_type = "UI"
+        bl_category = "Codex Unsafe"
+
+        def draw(self, context: bpy.types.Context):
+            layout = self.layout
+            wm = context.window_manager
+            text_block = _ensure_prompt_text_block(wm)
+            text = context.space_data.text if context.space_data else None
+
+            box = layout.box()
+            box.label(text="Prompt Editor", icon="TEXT")
+            box.prop_search(wm, "codex_unsafe_prompt_text_name", bpy.data, "texts", text="Prompt Text")
+            if text and text.name == text_block.name:
+                box.label(text=f"Editing: {text.name}")
+            else:
+                box.label(text=f"Active Prompt: {text_block.name}")
+            row = box.row(align=True)
+            row.operator("codex_unsafe.send_prompt", text="Send")
+            row.operator("codex_unsafe.connect", text="Connect")
+            box.label(text=f"Status: {wm.codex_unsafe_status}")
+            if _BRIDGE and _BRIDGE.thread_id:
+                box.label(text=f"Thread: {_BRIDGE.thread_id}")
+
+
     classes = (
         CODEX_PG_message,
         CODEX_UL_messages,
         CODEX_OT_unsafe_connect,
         CODEX_OT_unsafe_disconnect,
         CODEX_OT_unsafe_prepare_prompt_text,
-        CODEX_OT_unsafe_copy_prompt_to_text,
+        CODEX_OT_unsafe_open_prompt_editor,
         CODEX_OT_unsafe_send_prompt,
         CODEX_OT_unsafe_interrupt,
         VIEW3D_PT_codex_unsafe,
+        TEXTEDITOR_PT_codex_unsafe,
     )
 
 
@@ -389,10 +433,6 @@ else:
         bpy.types.WindowManager.codex_unsafe_prompt_text_name = bpy.props.StringProperty(
             name="Prompt Text",
             default=_DEFAULT_PROMPT_TEXT_NAME,
-        )
-        bpy.types.WindowManager.codex_unsafe_prompt_inline = bpy.props.StringProperty(
-            name="Quick Prompt",
-            default=_DEFAULT_INLINE_PROMPT,
         )
         bpy.types.WindowManager.codex_unsafe_status = bpy.props.StringProperty(
             name="Status",
@@ -423,7 +463,6 @@ else:
         del bpy.types.WindowManager.codex_unsafe_messages
         del bpy.types.WindowManager.codex_unsafe_event_log
         del bpy.types.WindowManager.codex_unsafe_status
-        del bpy.types.WindowManager.codex_unsafe_prompt_inline
         del bpy.types.WindowManager.codex_unsafe_prompt_text_name
         del bpy.types.WindowManager.codex_unsafe_cwd
         del bpy.types.WindowManager.codex_unsafe_model
