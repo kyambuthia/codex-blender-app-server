@@ -37,14 +37,20 @@ def main() -> int:
     try:
         client.start()
         prompt = (
-            "Use blender_run_python to create a UV sphere named CodexTestSphere at location (3, 0, 0). "
-            "Then call blender_get_scene_summary and report the object count plus whether CodexTestSphere exists. "
-            "Do not only describe the steps."
+            "Use only structured Blender tools and do not call blender_run_python. "
+            "Create a UV sphere named CodexTestSphere at location (3, 0, 0). "
+            "Create a material named CodexRed with base color [0.9, 0.1, 0.1, 1.0]. "
+            "Assign that material to CodexTestSphere. "
+            "Then call blender_get_object_info for CodexTestSphere and report its material and location."
         )
         client.send_prompt(prompt)
         wait_for_turn(client)
 
         sphere = bpy.data.objects.get("CodexTestSphere")
+        material = bpy.data.materials.get("CodexRed")
+        assigned_material = None
+        if sphere and sphere.material_slots and sphere.material_slots[0].material:
+            assigned_material = sphere.material_slots[0].material.name
         result = {
             "status": client.get_status(),
             "thread_id": client.thread_id,
@@ -52,6 +58,8 @@ def main() -> int:
             "object_names": sorted(obj.name for obj in bpy.data.objects),
             "sphere_exists": sphere is not None,
             "sphere_location": list(sphere.location) if sphere else None,
+            "assigned_material": assigned_material,
+            "material_exists": material is not None,
             "recent_events": client.get_events()[-25:],
         }
         print(json.dumps(result, indent=2))
@@ -60,10 +68,27 @@ def main() -> int:
             raise RuntimeError(f"turn ended with status {client.get_status()}")
         if sphere is None:
             raise RuntimeError("CodexTestSphere was not created")
+        if material is None:
+            raise RuntimeError("CodexRed material was not created")
+        if assigned_material != "CodexRed":
+            raise RuntimeError(f"CodexRed was not assigned to CodexTestSphere: {assigned_material}")
         if tuple(round(v, 3) for v in sphere.location) != (3.0, 0.0, 0.0):
             raise RuntimeError(f"CodexTestSphere location mismatch: {tuple(sphere.location)}")
         if "CodexTestSphere" not in client.get_assistant_text():
             raise RuntimeError("assistant output did not mention CodexTestSphere")
+        if "CodexRed" not in client.get_assistant_text():
+            raise RuntimeError("assistant output did not mention CodexRed")
+        recent_events = "\n".join(client.get_events())
+        if "tool call blender_run_python" in recent_events:
+            raise RuntimeError("structured tool test unexpectedly used blender_run_python")
+        for required_tool in (
+            "tool call blender_create_primitive",
+            "tool call blender_create_material",
+            "tool call blender_assign_material",
+            "tool call blender_get_object_info",
+        ):
+            if required_tool not in recent_events:
+                raise RuntimeError(f"structured tool test missed expected tool: {required_tool}")
         return 0
     finally:
         client.stop()

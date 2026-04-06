@@ -5,3 +5,4 @@ __pycache__/
 *.zip
 *.blend1
 *.blend2
+dist/

@@ -27,6 +27,47 @@ def fake_tool_runner(tool_name: str, arguments):
                 }
             ],
         }
+    if tool_name == "blender_list_objects":
+        return {
+            "success": True,
+            "contentItems": [{"type": "inputText", "text": '[{"name":"Cube","type":"MESH"}]'}],
+        }
+    if tool_name == "blender_get_object_info":
+        name = arguments.get("name", "Cube")
+        return {
+            "success": True,
+            "contentItems": [{"type": "inputText", "text": json.dumps({"name": name, "type": "MESH"}, indent=2)}],
+        }
+    if tool_name == "blender_select_objects":
+        return {
+            "success": True,
+            "contentItems": [{"type": "inputText", "text": json.dumps({"selected_objects": arguments.get("names", [])})}],
+        }
+    if tool_name == "blender_create_primitive":
+        return {
+            "success": True,
+            "contentItems": [{"type": "inputText", "text": json.dumps({"name": arguments.get("name", "NewPrimitive")})}],
+        }
+    if tool_name == "blender_set_object_transform":
+        return {
+            "success": True,
+            "contentItems": [{"type": "inputText", "text": json.dumps({"name": arguments.get("name"), "location": arguments.get("location")})}],
+        }
+    if tool_name == "blender_delete_objects":
+        return {
+            "success": True,
+            "contentItems": [{"type": "inputText", "text": json.dumps({"deleted": arguments.get("names", [])})}],
+        }
+    if tool_name == "blender_create_material":
+        return {
+            "success": True,
+            "contentItems": [{"type": "inputText", "text": json.dumps({"name": arguments.get("name", "Material")})}],
+        }
+    if tool_name == "blender_assign_material":
+        return {
+            "success": True,
+            "contentItems": [{"type": "inputText", "text": json.dumps({"object_name": arguments.get("object_name"), "material_name": arguments.get("material_name")})}],
+        }
     if tool_name == "blender_read_text_block":
         return {"success": True, "contentItems": [{"type": "inputText", "text": "print('hello')"}]}
     if tool_name == "blender_write_text_block":

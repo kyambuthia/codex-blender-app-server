@@ -6,7 +6,7 @@ This is intentionally high trust:
 
 - Codex runs with `approvalPolicy: "never"`.
 - The thread runs with `sandbox: "danger-full-access"`.
-- The add-on exposes `blender.run_python`, which executes arbitrary Python against the live Blender process.
+- The add-on exposes `blender_run_python`, which executes arbitrary Python against the live Blender process.
 
 Do not install this in an environment you do not control.
 
@@ -21,11 +21,21 @@ Do not install this in an environment you do not control.
 ## Current tool surface
 
 - `blender_get_scene_summary`
+- `blender_list_objects`
+- `blender_get_object_info`
+- `blender_select_objects`
+- `blender_create_primitive`
+- `blender_set_object_transform`
+- `blender_delete_objects`
+- `blender_create_material`
+- `blender_assign_material`
 - `blender_read_text_block`
 - `blender_write_text_block`
 - `blender_run_python`
 
-`blender_run_python` is the escape hatch. It can do anything Blender's Python API can do.
+The structured tools cover the common scene workflow: inspect objects, create primitives, move them, select them, create materials, assign materials, and delete objects.
+
+`blender_run_python` remains the escape hatch. It can do anything Blender's Python API can do.
 
 ## Project layout
 
@@ -61,7 +71,7 @@ If you want the safer version later, the first thing to change is:
 - remove `approvalPolicy: "never"`
 - remove `sandbox: "danger-full-access"`
 - stop auto-accepting approval requests
-- disable `blender.run_python` or gate it behind a user approval step
+- disable `blender_run_python` or gate it behind a user approval step
 
 ## Local verification
 

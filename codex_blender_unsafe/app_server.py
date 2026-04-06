@@ -469,6 +469,162 @@ class CodexAppServerClient:
                 },
             },
             {
+                "name": "blender_list_objects",
+                "description": "List objects in the current scene, optionally filtered by object type or current selection.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string"},
+                        "selected_only": {"type": "boolean"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "blender_get_object_info",
+                "description": "Return detailed information for a single Blender object by name.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "blender_select_objects",
+                "description": "Select, add-select, or deselect Blender objects by name.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["names"],
+                    "properties": {
+                        "names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["replace", "add", "remove"],
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "blender_create_primitive",
+                "description": "Create a primitive mesh object such as a cube, sphere, plane, cylinder, cone, torus, or monkey.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["primitive_type"],
+                    "properties": {
+                        "primitive_type": {
+                            "type": "string",
+                            "enum": ["cube", "uv_sphere", "ico_sphere", "cylinder", "cone", "plane", "torus", "monkey"],
+                        },
+                        "name": {"type": "string"},
+                        "location": {
+                            "type": "array",
+                            "minItems": 3,
+                            "maxItems": 3,
+                            "items": {"type": "number"},
+                        },
+                        "rotation": {
+                            "type": "array",
+                            "minItems": 3,
+                            "maxItems": 3,
+                            "items": {"type": "number"},
+                        },
+                        "scale": {
+                            "type": "array",
+                            "minItems": 3,
+                            "maxItems": 3,
+                            "items": {"type": "number"},
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "blender_set_object_transform",
+                "description": "Set location, Euler rotation, and or scale for an existing object.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "location": {
+                            "type": "array",
+                            "minItems": 3,
+                            "maxItems": 3,
+                            "items": {"type": "number"},
+                        },
+                        "rotation": {
+                            "type": "array",
+                            "minItems": 3,
+                            "maxItems": 3,
+                            "items": {"type": "number"},
+                        },
+                        "scale": {
+                            "type": "array",
+                            "minItems": 3,
+                            "maxItems": 3,
+                            "items": {"type": "number"},
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "blender_delete_objects",
+                "description": "Delete one or more objects by name from the current Blender file.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["names"],
+                    "properties": {
+                        "names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "blender_create_material",
+                "description": "Create or update a material and optionally set Principled BSDF base color, metallic, and roughness.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "base_color": {
+                            "type": "array",
+                            "minItems": 4,
+                            "maxItems": 4,
+                            "items": {"type": "number"},
+                        },
+                        "metallic": {"type": "number"},
+                        "roughness": {"type": "number"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "blender_assign_material",
+                "description": "Assign an existing material to an object material slot.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["object_name", "material_name"],
+                    "properties": {
+                        "object_name": {"type": "string"},
+                        "material_name": {"type": "string"},
+                        "slot_index": {"type": "integer", "minimum": 0},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "blender_read_text_block",
                 "description": "Read a Blender text datablock by name.",
                 "inputSchema": {
@@ -515,8 +671,11 @@ class CodexAppServerClient:
             "for scene changes or Blender scripting help. "
             "Unsafe mode is enabled: approval policy is never, sandbox is danger-full-access, "
             "and blender_run_python executes arbitrary Python against the live Blender process. "
+            "Prefer structured tools such as blender_create_primitive, blender_set_object_transform, "
+            "blender_create_material, blender_assign_material, blender_get_object_info, and "
+            "blender_select_objects for normal scene operations. "
             "Prefer blender_get_scene_summary before destructive changes unless the user's intent is already precise. "
-            "When code is useful, execute it through blender_run_python instead of only describing it."
+            "Use blender_run_python only when the structured tools cannot express the requested operation."
         )
 
 
