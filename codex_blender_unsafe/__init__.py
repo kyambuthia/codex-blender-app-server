@@ -13,7 +13,7 @@ from .app_server import CodexAppServerClient, default_workspace
 bl_info = {
     "name": "Codex Blender Unsafe",
     "author": "OpenAI Codex",
-    "version": (0, 4, 0),
+    "version": (0, 4, 1),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Codex Unsafe",
     "description": "Unsafe live Codex App Server integration for Blender 3.0",
@@ -29,6 +29,11 @@ _DEFAULT_PROMPT_TEXT = (
     "Prefer the structured Blender tools before blender_run_python."
 )
 _SPINNER_FRAMES = ("|", "/", "-", "\\")
+_ACTIVITY_FILTER_ITEMS = (
+    ("ALL", "All", "Show all activity"),
+    ("MESSAGES", "Messages", "Show user and assistant messages"),
+    ("TOOLS", "Tools", "Show tool activity only"),
+)
 
 
 def _workspace_default() -> str:
@@ -116,6 +121,23 @@ else:
         if status == "error":
             return "Error"
         return status.title()
+
+
+    def _selected_context_label() -> str:
+        active = bpy.context.object.name if bpy.context.object else "None"
+        selected_count = len(bpy.context.selected_objects)
+        return f"Active: {active} | Selected: {selected_count}"
+
+
+    def _activity_counts(wm: bpy.types.WindowManager) -> str:
+        tool_items = [item for item in wm.codex_unsafe_messages if item.kind == "tool"]
+        if not tool_items:
+            return "No tool steps yet."
+        completed = sum(1 for item in tool_items if item.status == "completed")
+        running = next((item.title for item in reversed(tool_items) if item.status == "running"), None)
+        if running:
+            return f"{completed}/{len(tool_items)} steps complete | Running: {running}"
+        return f"{completed}/{len(tool_items)} steps complete"
 
 
     def _find_workspace(name: str) -> bpy.types.WorkSpace | None:
@@ -266,6 +288,19 @@ else:
     class CODEX_UL_messages(bpy.types.UIList):
         bl_idname = "CODEX_UL_messages"
 
+        def filter_items(self, context, data, propname):
+            items = getattr(data, propname)
+            filter_mode = context.window_manager.codex_unsafe_activity_filter
+            flags = []
+            for item in items:
+                visible = True
+                if filter_mode == "MESSAGES":
+                    visible = item.kind != "tool"
+                elif filter_mode == "TOOLS":
+                    visible = item.kind == "tool"
+                flags.append(self.bitflag_filter_item if visible else 0)
+            return flags, []
+
         def draw_item(
             self,
             context: bpy.types.Context,
@@ -401,6 +436,7 @@ else:
             session.label(text="Session", icon="PLUGIN")
             session.prop(wm, "codex_unsafe_model")
             session.prop(wm, "codex_unsafe_cwd")
+            session.label(text=_selected_context_label(), icon="RESTRICT_SELECT_OFF")
             row = session.row(align=True)
             row.operator("codex_unsafe.open_workspace", text="Open Codex")
             row.operator("codex_unsafe.connect", text="Connect")
@@ -419,43 +455,39 @@ else:
             row.operator("codex_unsafe.open_workspace", text="Open Codex")
             row.operator("codex_unsafe.send_prompt", text="Send")
             prompt.label(text="The Codex workspace uses the bottom editor area as the prompt composer.")
-            preview = prompt.box()
-            preview.label(text="Composer Preview")
-            _draw_wrapped_text(preview, _prompt_text(wm), width=72, limit=8)
 
-            steps = layout.box()
-            steps.label(text="Steps", icon="CHECKMARK")
-            step_items = [item for item in wm.codex_unsafe_messages if item.kind == "tool"]
-            if not step_items:
-                steps.label(text="No tool steps yet.")
-            else:
-                for step_item in step_items[-8:]:
-                    row = steps.row(align=True)
-                    row.label(text=step_item.title, icon=_status_icon(step_item.status))
-                    row.label(text=step_item.status or "idle")
-
-            transcript = layout.box()
-            transcript.label(text="Conversation", icon="WORDWRAP_ON")
-            transcript.template_list(
+            activity = layout.box()
+            activity.label(text="Activity", icon="WORDWRAP_ON")
+            activity.label(text=_activity_counts(wm), icon="INFO")
+            activity.prop(wm, "codex_unsafe_activity_filter", text="Show")
+            activity.template_list(
                 "CODEX_UL_messages",
                 "",
                 wm,
                 "codex_unsafe_messages",
                 wm,
                 "codex_unsafe_message_index",
-                rows=8,
+                rows=10,
             )
             if wm.codex_unsafe_messages:
                 selected = wm.codex_unsafe_messages[wm.codex_unsafe_message_index]
-                detail = transcript.box()
+                detail = activity.box()
                 detail.label(text=f"{selected.title} [{selected.status or 'idle'}]", icon=_message_icon(selected.role, selected.kind))
                 _draw_wrapped_text(detail, selected.body, width=78, limit=20)
             else:
-                transcript.label(text="No conversation yet.")
+                activity.label(text="No activity yet.")
 
-            activity = layout.box()
-            activity.label(text="Activity", icon="INFO")
-            _draw_wrapped_text(activity, wm.codex_unsafe_event_log, width=78, limit=14)
+            advanced = layout.box()
+            row = advanced.row()
+            row.prop(
+                wm,
+                "codex_unsafe_show_advanced",
+                text="Advanced",
+                icon="TRIA_DOWN" if wm.codex_unsafe_show_advanced else "TRIA_RIGHT",
+                emboss=False,
+            )
+            if wm.codex_unsafe_show_advanced:
+                _draw_wrapped_text(advanced, wm.codex_unsafe_event_log, width=78, limit=14)
 
 
     class TEXTEDITOR_PT_codex_unsafe(bpy.types.Panel):
@@ -478,6 +510,7 @@ else:
                 box.label(text=f"Editing: {text.name}")
             else:
                 box.label(text=f"Active Prompt: {text_block.name}")
+            box.label(text="Use Send Prompt. Do not use Blender Run Script.", icon="ERROR")
             row = box.row(align=True)
             row.operator("codex_unsafe.send_prompt", text="Send")
             row.operator("codex_unsafe.connect", text="Connect")
@@ -532,6 +565,15 @@ else:
             name="Event Log",
             default="",
         )
+        bpy.types.WindowManager.codex_unsafe_activity_filter = bpy.props.EnumProperty(
+            name="Activity Filter",
+            items=_ACTIVITY_FILTER_ITEMS,
+            default="ALL",
+        )
+        bpy.types.WindowManager.codex_unsafe_show_advanced = bpy.props.BoolProperty(
+            name="Show Advanced",
+            default=False,
+        )
         bpy.types.WindowManager.codex_unsafe_messages = bpy.props.CollectionProperty(
             type=CODEX_PG_message,
         )
@@ -552,6 +594,8 @@ else:
 
         del bpy.types.WindowManager.codex_unsafe_message_index
         del bpy.types.WindowManager.codex_unsafe_messages
+        del bpy.types.WindowManager.codex_unsafe_show_advanced
+        del bpy.types.WindowManager.codex_unsafe_activity_filter
         del bpy.types.WindowManager.codex_unsafe_event_log
         del bpy.types.WindowManager.codex_unsafe_spinner_index
         del bpy.types.WindowManager.codex_unsafe_status
